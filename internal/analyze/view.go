@@ -11,9 +11,9 @@ import (
 // ─── Color tokens ────────────────────────────────────────────────────────────
 
 var (
-	clrBar     = lipgloss.AdaptiveColor{Light: "#0ea5e9", Dark: "#38bdf8"}
-	clrBarHot  = lipgloss.AdaptiveColor{Light: "#f59e0b", Dark: "#fbbf24"}
-	clrBarCrit = lipgloss.AdaptiveColor{Light: "#ef4444", Dark: "#f87171"}
+	clrBar     = lipgloss.AdaptiveColor{Light: "#a0724e", Dark: "#d4a574"} // Caramel bar
+	clrBarHot  = lipgloss.AdaptiveColor{Light: "#c4873b", Dark: "#e8a857"} // Warm amber
+	clrBarCrit = lipgloss.AdaptiveColor{Light: "#c9605a", Dark: "#e8877f"} // Soft coral
 	clrDim     = ui.ColorMuted
 	clrDir     = ui.ColorSecondary
 	clrFile    = ui.ColorText

@@ -60,7 +60,7 @@ func enableVTProcessing() {
 
 // ShowMoleIntro displays an animated mole appearing line-by-line.
 // Only runs in interactive terminals; silently returns otherwise.
-// Purple for the mole body, green for the ground.
+// Dusty rose for the mole body, espresso brown for the ground.
 func ShowMoleIntro() {
 	if !isTerminal() {
 		return
@@ -95,7 +95,7 @@ func ShowMoleIntro() {
 // ─── Brand Banner ────────────────────────────────────────────────────────────
 
 // ShowBrandBanner returns the full ASCII brand banner as a styled string,
-// ready to be printed. Green wordmark, muted tagline, blue URL.
+// ready to be printed. Espresso wordmark, mocha tagline, caramel URL.
 func ShowBrandBanner() string {
 	var b strings.Builder
 

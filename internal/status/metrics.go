@@ -136,8 +136,10 @@ func CollectMetrics(prevNet *NetworkMetrics, interval time.Duration) (*SystemMet
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		total, _ := cpu.Percent(0, false)
-		perCore, _ := cpu.Percent(0, true)
+		// Use a small measurement window — cpu.Percent(0) on Windows
+		// can return 0 on the first call because there's no prior sample.
+		total, _ := cpu.Percent(200*time.Millisecond, false)
+		perCore, _ := cpu.Percent(200*time.Millisecond, true)
 		infos, _ := cpu.Info()
 
 		mu.Lock()
@@ -324,7 +326,21 @@ func CollectMetrics(prevNet *NetworkMetrics, interval time.Duration) (*SystemMet
 		mu.Unlock()
 	}()
 
-	wg.Wait()
+	// Wait with timeout — WMI queries and process enumeration can hang
+	// indefinitely on Windows. Return whatever we've collected so far.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// All collectors finished in time.
+	case <-time.After(5 * time.Second):
+		// Partial results are better than hanging forever.
+	}
+
 	return m, nil
 }
 

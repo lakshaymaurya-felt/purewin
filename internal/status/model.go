@@ -45,10 +45,11 @@ type StatusModel struct {
 	quitting        bool
 	Err             error
 
-	// Sparkline ring buffers (last 30 readings).
+	// Sparkline ring buffers (last 60 readings).
 	NetSendHistory []uint64
 	NetRecvHistory []uint64
 	CPUHistory     []float64
+	MemHistory     []float64
 }
 
 // NewStatusModel creates a StatusModel with the given refresh cadence.
@@ -133,10 +134,11 @@ func (m StatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Metrics = msg.metrics
 		m.prevNet = &msg.metrics.Network
 
-		// Append to sparkline histories (cap at 30).
-		m.CPUHistory = appendF64(m.CPUHistory, msg.metrics.CPU.TotalPercent, 30)
-		m.NetSendHistory = appendU64(m.NetSendHistory, msg.metrics.Network.SendSpeed, 30)
-		m.NetRecvHistory = appendU64(m.NetRecvHistory, msg.metrics.Network.RecvSpeed, 30)
+		// Append to sparkline histories (cap at 60).
+		m.CPUHistory = appendF64(m.CPUHistory, msg.metrics.CPU.TotalPercent, 60)
+		m.MemHistory = appendF64(m.MemHistory, msg.metrics.Memory.UsedPercent, 60)
+		m.NetSendHistory = appendU64(m.NetSendHistory, msg.metrics.Network.SendSpeed, 60)
+		m.NetRecvHistory = appendU64(m.NetRecvHistory, msg.metrics.Network.RecvSpeed, 60)
 
 		return m, m.doTick()
 	}
@@ -153,17 +155,17 @@ func (m StatusModel) View() string {
 
 // ─── History helpers ─────────────────────────────────────────────────────────
 
-func appendF64(h []float64, v float64, cap int) []float64 {
+func appendF64(h []float64, v float64, maxLen int) []float64 {
 	h = append(h, v)
-	if len(h) > cap {
+	if len(h) > maxLen {
 		h = h[1:]
 	}
 	return h
 }
 
-func appendU64(h []uint64, v uint64, cap int) []uint64 {
+func appendU64(h []uint64, v uint64, maxLen int) []uint64 {
 	h = append(h, v)
-	if len(h) > cap {
+	if len(h) > maxLen {
 		h = h[1:]
 	}
 	return h

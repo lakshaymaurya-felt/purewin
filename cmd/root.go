@@ -6,13 +6,15 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/lakshaymaurya-felt/winmole/internal/core"
 	"github.com/lakshaymaurya-felt/winmole/internal/ui"
 )
 
 var (
 	// Global flags
-	debug  bool
-	dryRun bool
+	debug    bool
+	dryRun   bool
+	runAdmin bool
 
 	// Version info populated from main
 	appVersion = "dev"
@@ -50,6 +52,29 @@ func init() {
 	}
 
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Show detailed operation logs")
+	rootCmd.PersistentFlags().BoolVar(&runAdmin, "admin", false, "Re-launch WinMole with administrator privileges (UAC)")
+
+	// PersistentPreRun: if --admin is set, re-launch elevated and exit.
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if !runAdmin {
+			return
+		}
+		// Already elevated — nothing to do.
+		if core.IsElevated() {
+			return
+		}
+		// Build args without --admin to avoid infinite loop.
+		var elevatedArgs []string
+		for _, a := range os.Args[1:] {
+			if a != "--admin" {
+				elevatedArgs = append(elevatedArgs, a)
+			}
+		}
+		if err := core.RunElevated(elevatedArgs); err != nil {
+			fmt.Fprintf(os.Stderr, "%s %v\n", ui.IconError, err)
+			os.Exit(1)
+		}
+	}
 
 	// Register all subcommands
 	rootCmd.AddCommand(cleanCmd)
