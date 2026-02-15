@@ -1,0 +1,28 @@
+# Binaries
+wm.exe
+winmole.exe
+*.exe
+!scripts/*.ps1
+
+# Go build
+/dist/
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Test
+coverage.out
+*.test
+
+# Config (local)
+.env
