@@ -25,6 +25,8 @@ Write-Host "   Fetching latest release..." -ForegroundColor Gray
 try {
     $releaseInfo = Invoke-RestMethod -Uri "https://api.github.com/repos/lakshaymaurya-felt/purewin/releases/latest"
     $version = $releaseInfo.tag_name
+    # Strip leading 'v' for asset name (goreleaser uses version without v prefix)
+    $versionNum = $version -replace '^v', ''
     Write-Host "   Latest version: $version" -ForegroundColor Green
 } catch {
     Write-Host "   Failed to fetch release info from GitHub API." -ForegroundColor Red
@@ -33,7 +35,7 @@ try {
 }
 
 # Find the correct asset for the detected architecture
-$assetName = "purewin_${version}_windows_${arch}.zip"
+$assetName = "purewin_${versionNum}_windows_${arch}.zip"
 $asset = $releaseInfo.assets | Where-Object { $_.name -eq $assetName }
 
 if (-not $asset) {
