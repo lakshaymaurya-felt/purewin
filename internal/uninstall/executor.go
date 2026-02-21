@@ -4,10 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 const (
@@ -53,6 +58,22 @@ func UninstallApp(app InstalledApp, quiet bool) error {
 		return runMSIUninstall(cmdStr, quiet)
 	}
 
+	// Edge requires registry preparation before uninstall can proceed.
+	if installerType == InstallerEdge {
+		if err := prepareEdgeUninstall(); err != nil {
+			return fmt.Errorf("failed to prepare Edge uninstall: %w", err)
+		}
+		// Run the uninstall. On failure: clean up stub AND restart Edge services
+		// so Edge isn't left in a broken state. On success: stub MUST remain to
+		// prevent Windows from re-provisioning Edge on future updates.
+		uninstallErr := runUninstallCommand(cmdStr, installerType, quiet)
+		if uninstallErr != nil {
+			cleanupEdgeStub()
+			restartEdgeServices()
+		}
+		return uninstallErr
+	}
+
 	// For non-MSI installers, parse the command and apply silent flags if needed.
 	return runUninstallCommand(cmdStr, installerType, quiet)
 }
@@ -95,31 +116,38 @@ func parseUninstallString(cmdStr string) (string, []string) {
 }
 
 // detectInstallerType analyzes the uninstall command to determine installer technology.
+// Detection is based on the executable name (not the full path) to avoid false matches
+// from directory names containing patterns like "update.exe" or "uninst".
 func detectInstallerType(cmdStr string) InstallerType {
 	lower := strings.ToLower(cmdStr)
 
-	// Check for MSI (msiexec).
-	if strings.Contains(lower, "msiexec") {
+	// Extract executable name for all path-based detection.
+	exe, _ := parseUninstallString(cmdStr)
+	exeName := strings.ToLower(filepath.Base(exe))
+
+	// Check for MSI (msiexec.exe).
+	if exeName == "msiexec.exe" || exeName == "msiexec" {
 		return InstallerMSI
 	}
 
 	// Check for Microsoft Edge (setup.exe --uninstall --msedge).
-	if strings.Contains(lower, "setup.exe") && strings.Contains(lower, "--msedge") {
+	// --msedge is in args, so we check the full string for it, but exe must be setup.exe.
+	if exeName == "setup.exe" && strings.Contains(lower, "--msedge") {
 		return InstallerEdge
 	}
 
 	// Check for Squirrel/Electron (Update.exe).
-	if strings.Contains(lower, "update.exe") {
+	if exeName == "update.exe" {
 		return InstallerSquirrel
 	}
 
 	// Check for InnoSetup (unins000.exe, unins001.exe, etc.).
-	if uninsPattern.MatchString(lower) {
+	if uninsPattern.MatchString(exeName) {
 		return InstallerInnoSetup
 	}
 
-	// Check for NSIS (commonly has "uninst" in path).
-	if strings.Contains(lower, "uninst") {
+	// Check for NSIS (commonly named uninst.exe, uninstall.exe, etc.).
+	if strings.Contains(exeName, "uninst") {
 		return InstallerNSIS
 	}
 
@@ -176,10 +204,10 @@ func applySilentFlags(args []string, installerType InstallerType, quiet bool) []
 		}
 
 	case InstallerNSIS:
-		// NSIS uses /S for silent.
+		// NSIS uses /S for silent (case-sensitive — must be uppercase).
 		hasS := false
 		for _, arg := range args {
-			if strings.EqualFold(arg, "/S") {
+			if arg == "/S" {
 				hasS = true
 				break
 			}
@@ -260,6 +288,112 @@ func runMSIUninstall(cmdStr string, quiet bool) error {
 	return nil
 }
 
+// prepareEdgeUninstall sets required registry keys and stub files to allow Edge removal.
+// Without this, Edge's setup.exe returns exit code 93 (uninstall blocked).
+// Based on the proven approach used by Win11Debloat (10k+ stars), ChrisTitusTech/winutil
+// (47k+ stars), RyTuneX, and other production tools.
+func prepareEdgeUninstall() error {
+	// 1. Stop Edge Update services first — the SCM can restart killed processes.
+	edgeServices := []string{"edgeupdate", "edgeupdatem"}
+	for _, svc := range edgeServices {
+		svcCtx, svcCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = exec.CommandContext(svcCtx, "sc", "stop", svc).Run()
+		svcCancel()
+	}
+
+	// 2. Kill all Edge processes — they hold file locks and registry handles.
+	edgeProcesses := []string{"msedge.exe", "msedgewebview2.exe", "MicrosoftEdgeUpdate.exe"}
+	for _, proc := range edgeProcesses {
+		killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = exec.CommandContext(killCtx, "taskkill", "/F", "/IM", proc, "/T").Run()
+		killCancel()
+	}
+
+	// 3. Create EdgeUpdateDev key with AllowUninstall (empty string value).
+	// Must use WOW6432Node path since Edge installer is 32-bit.
+	// This is the CRITICAL step — if it fails, restart Edge services so we don't leave
+	// Edge in a broken state (processes killed but registry unchanged).
+	devKey, _, err := registry.CreateKey(
+		registry.LOCAL_MACHINE,
+		`SOFTWARE\WOW6432Node\Microsoft\EdgeUpdateDev`,
+		registry.SET_VALUE,
+	)
+	if err != nil {
+		restartEdgeServices()
+		return fmt.Errorf("failed to create EdgeUpdateDev key (need admin): %w", err)
+	}
+	if err := devKey.SetStringValue("AllowUninstall", ""); err != nil {
+		devKey.Close()
+		restartEdgeServices()
+		return fmt.Errorf("failed to set AllowUninstall: %w", err)
+	}
+	devKey.Close()
+
+	// 4. Prevent Edge from reinstalling via Windows Update.
+	euKey, _, err := registry.CreateKey(
+		registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\EdgeUpdate`,
+		registry.SET_VALUE,
+	)
+	if err == nil {
+		_ = euKey.SetDWordValue("DoNotUpdateToEdgeWithChromium", 1) // Best effort.
+		euKey.Close()
+	}
+
+	// 5. Remove NoRemove flag from Edge uninstall key (allows uninstall button in Settings too).
+	edgeUninstallKey, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge`,
+		registry.SET_VALUE,
+	)
+	if err == nil {
+		_ = edgeUninstallKey.DeleteValue("NoRemove") // Best effort.
+		edgeUninstallKey.Close()
+	}
+
+	// 6. Create Edge UWP stub directory + file.
+	// This tricks the Chromium Edge uninstaller into thinking the legacy Edge UWP app exists,
+	// which is a prerequisite for the uninstaller to proceed.
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		restartEdgeServices()
+		return fmt.Errorf("SystemRoot environment variable is not set")
+	}
+	stubDir := filepath.Join(sysRoot, "SystemApps", "Microsoft.MicrosoftEdge_8wekyb3d8bbwe")
+	_ = os.MkdirAll(stubDir, 0o755) // Best effort — may already exist.
+	stubFile := filepath.Join(stubDir, "MicrosoftEdge.exe")
+	if _, statErr := os.Stat(stubFile); os.IsNotExist(statErr) {
+		_ = os.WriteFile(stubFile, []byte{}, 0o644) // Empty stub file.
+	}
+
+	return nil
+}
+
+// restartEdgeServices attempts to restart Edge Update services after a failed preparation.
+// Best effort — prevents leaving Edge in a broken state (services stopped but uninstall not proceeding).
+func restartEdgeServices() {
+	edgeServices := []string{"edgeupdate", "edgeupdatem"}
+	for _, svc := range edgeServices {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = exec.CommandContext(ctx, "sc", "start", svc).Run()
+		cancel()
+	}
+}
+
+// cleanupEdgeStub removes ONLY the zero-byte stub file created by prepareEdgeUninstall.
+// Does NOT use RemoveAll to avoid destroying pre-existing UWP Edge files on rollback.
+func cleanupEdgeStub() {
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		return // Cannot determine path safely — leave as-is.
+	}
+	stub := filepath.Join(sysRoot, "SystemApps", "Microsoft.MicrosoftEdge_8wekyb3d8bbwe", "MicrosoftEdge.exe")
+	info, err := os.Stat(stub)
+	if err == nil && info.Size() == 0 {
+		_ = os.Remove(stub) // Only remove if it's our zero-byte stub, not a real executable.
+	}
+}
+
 // runUninstallCommand runs an arbitrary uninstall command.
 // This is the CRITICAL FIX for the Logseq bug: we parse the command string properly
 // instead of passing it raw to cmd.exe, which allows quoted paths with spaces to work.
@@ -296,6 +430,8 @@ func handleExitError(err error, output []byte) error {
 	if errors.As(err, &exitErr) {
 		code := exitErr.ExitCode()
 		switch code {
+		case 93:
+			return fmt.Errorf("Edge uninstall blocked by system protection (exit code 93) — run with --admin and retry")
 		case 1605:
 			return fmt.Errorf("product is not currently installed (exit code 1605)")
 		case 1641, 3010:
@@ -304,7 +440,12 @@ func handleExitError(err error, output []byte) error {
 		default:
 			outputStr := strings.TrimSpace(string(output))
 			if len(outputStr) > 200 {
-				outputStr = outputStr[:200] + "..."
+				// Truncate at a valid UTF-8 boundary to avoid producing invalid strings.
+				outputStr = outputStr[:200]
+				for len(outputStr) > 0 && !utf8.ValidString(outputStr) {
+					outputStr = outputStr[:len(outputStr)-1]
+				}
+				outputStr += "..."
 			}
 			if outputStr != "" {
 				return fmt.Errorf("uninstall failed (exit code %d): %s", code, outputStr)
