@@ -104,6 +104,15 @@ func runClean(cmd *cobra.Command, args []string) {
 		userTargets := config.GetTargetsByCategory("user")
 		userResults := clean.ScanAll(userTargets, wl, isAdmin)
 		allResults = append(allResults, userResults...)
+
+		// Scan non-system drives (D:, E:, etc.) for temp/junk files.
+		driveItems := clean.ScanNonSystemDrives(wl)
+		if len(driveItems) > 0 {
+			driveGroups := groupItemsByDescription(driveItems)
+			for name, items := range driveGroups {
+				allResults = append(allResults, clean.ItemsToResult(name, items))
+			}
+		}
 	}
 
 	// Browser caches: use specialized multi-profile scanner.
