@@ -15,7 +15,7 @@ import (
 
 const (
 	// GitHubAPIURL is the GitHub API endpoint for releases
-	GitHubAPIURL = "https://api.github.com/repos/lakshaymaurya-felt/purewin/releases/latest"
+	GitHubAPIURL = "https://api.github.com/repos/lakshaymdev/purewin/releases/latest"
 
 	// UpdateCheckCacheFile stores the last update check result
 	UpdateCheckCacheFile = "last_update_check.json"
@@ -74,17 +74,24 @@ func CheckForUpdate(currentVersion string) (latestVersion string, downloadURL st
 
 	latestVersion = strings.TrimPrefix(release.TagName, "v")
 
-	// Find the appropriate asset for this platform
-	assetName := getAssetNameForPlatform()
+	// Find the appropriate asset for this platform.
+	// Try multiple naming conventions since releases may use either.
+	assetNames := getAssetNamesForPlatform()
 	for _, asset := range release.Assets {
-		if asset.Name == assetName {
-			downloadURL = asset.BrowserDownloadURL
+		for _, name := range assetNames {
+			if strings.EqualFold(asset.Name, name) {
+				downloadURL = asset.BrowserDownloadURL
+				break
+			}
+		}
+		if downloadURL != "" {
 			break
 		}
 	}
 
 	if downloadURL == "" {
-		return "", "", fmt.Errorf("no asset found for platform %s/%s", runtime.GOOS, runtime.GOARCH)
+		return "", "", fmt.Errorf("no asset found for platform %s/%s (tried: %s)",
+			runtime.GOOS, runtime.GOARCH, strings.Join(assetNames, ", "))
 	}
 
 	return latestVersion, downloadURL, nil
@@ -149,10 +156,14 @@ func saveUpdateCache(path string, cache UpdateCheckCache) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// getAssetNameForPlatform returns the expected asset name for the current platform.
-func getAssetNameForPlatform() string {
-	// Expected format: purewin_windows_amd64.exe, purewin_windows_arm64.exe, etc.
-	return fmt.Sprintf("purewin_%s_%s.exe", runtime.GOOS, runtime.GOARCH)
+// getAssetNamesForPlatform returns candidate asset names for the current platform.
+// Supports both the simple name (pw.exe) and the platform-specific convention.
+func getAssetNamesForPlatform() []string {
+	return []string{
+		"pw.exe",
+		fmt.Sprintf("pw_%s_%s.exe", runtime.GOOS, runtime.GOARCH),
+		fmt.Sprintf("purewin_%s_%s.exe", runtime.GOOS, runtime.GOARCH),
+	}
 }
 
 // DownloadUpdate downloads the update from the given URL to a temporary file.
