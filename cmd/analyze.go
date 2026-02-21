@@ -93,6 +93,16 @@ func runAnalyze(cmd *cobra.Command, args []string) {
 		_ = analyze.SaveCache(root, target)
 	}
 
+	// Interactive TUI requires VT processing for ANSI cursor positioning.
+	if !ui.IsVTEnabled() {
+		// Fall back to a static tree view when VT is unavailable.
+		fmt.Fprintln(os.Stderr, "Note: Interactive analyzer requires a modern terminal with ANSI support.")
+		fmt.Fprintln(os.Stderr, "Showing static summary instead.")
+		fmt.Fprintln(os.Stderr, "")
+		analyze.PrintStaticTree(root, depth, minSize)
+		return
+	}
+
 	// Launch the TUI.
 	model := analyze.NewAnalyzeModel(root, depth, minSize)
 	p := tea.NewProgram(model, tea.WithAltScreen())

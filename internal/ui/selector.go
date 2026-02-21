@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"bufio"
 	"fmt"
+	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -401,6 +403,11 @@ func (m SelectorModel) View() string {
 // RunSelector creates a Bubbletea program, runs the selector, and returns
 // the selected items. Returns (nil, nil) if the user quit without confirming.
 func RunSelector(items []SelectorItem, title string) ([]SelectorItem, error) {
+	// If VT processing is unavailable, use simple numbered list
+	if !IsVTEnabled() {
+		return runSimpleSelector(items, title)
+	}
+
 	m := NewSelectorModel(items).SetTitle(title)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
@@ -415,4 +422,117 @@ func RunSelector(items []SelectorItem, title string) ([]SelectorItem, error) {
 	}
 
 	return result.GetSelected(), nil
+}
+
+// runSimpleSelector provides a text-only fallback when VT processing is unavailable.
+// Displays a numbered list and lets the user type numbers to toggle selection.
+func runSimpleSelector(items []SelectorItem, title string) ([]SelectorItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+
+	fmt.Println()
+	if title != "" {
+		fmt.Printf("  %s\n", title)
+		fmt.Println(strings.Repeat("-", 50))
+	}
+	fmt.Println()
+
+	// Display numbered list
+	for i, item := range items {
+		status := "[ ]"
+		if item.Selected {
+			status = "[x]"
+		}
+		if item.Disabled {
+			status = "[-]"
+		}
+		size := ""
+		if item.Size != "" {
+			size = "  " + item.Size
+		}
+		fmt.Printf("  %3d. %s %s%s\n", i+1, status, item.Label, size)
+	}
+
+	fmt.Println()
+	fmt.Println("  Enter numbers to toggle (e.g., 1 3 5), 'a' for all, 'n' for none,")
+	fmt.Println("  then press Enter to confirm. Or type 'q' to cancel.")
+	fmt.Println()
+
+	scanner := bufio.NewScanner(os.Stdin)
+
+	for {
+		// Show current selection count
+		selCount := 0
+		for _, item := range items {
+			if item.Selected {
+				selCount++
+			}
+		}
+		fmt.Printf("  [%d/%d selected] > ", selCount, len(items))
+
+		if !scanner.Scan() {
+			return nil, nil
+		}
+
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			// Empty enter = confirm current selection
+			var selected []SelectorItem
+			for _, item := range items {
+				if item.Selected {
+					selected = append(selected, item)
+				}
+			}
+			return selected, nil
+		}
+
+		switch strings.ToLower(input) {
+		case "q", "quit":
+			return nil, nil
+		case "a", "all":
+			for i := range items {
+				if !items[i].Disabled {
+					items[i].Selected = true
+				}
+			}
+			// Redisplay
+			for i, item := range items {
+				status := "[ ]"
+				if item.Selected {
+					status = "[x]"
+				}
+				if item.Disabled {
+					status = "[-]"
+				}
+				fmt.Printf("  %3d. %s %s\n", i+1, status, item.Label)
+			}
+		case "n", "none":
+			for i := range items {
+				items[i].Selected = false
+			}
+			fmt.Println("  Deselected all.")
+		default:
+			// Parse space-separated numbers
+			parts := strings.Fields(input)
+			for _, part := range parts {
+				num := 0
+				if _, err := fmt.Sscanf(part, "%d", &num); err != nil || num < 1 || num > len(items) {
+					fmt.Printf("  Invalid: %s (enter 1-%d)\n", part, len(items))
+					continue
+				}
+				idx := num - 1
+				if items[idx].Disabled {
+					fmt.Printf("  %s is disabled, cannot toggle.\n", items[idx].Label)
+					continue
+				}
+				items[idx].Selected = !items[idx].Selected
+				status := "selected"
+				if !items[idx].Selected {
+					status = "deselected"
+				}
+				fmt.Printf("  %d. %s %s\n", num, items[idx].Label, status)
+			}
+		}
+	}
 }

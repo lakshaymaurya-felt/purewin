@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lakshaymaurya-felt/purewin/internal/status"
+	"github.com/lakshaymaurya-felt/purewin/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +40,22 @@ func runStatus(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	// Interactive dashboard.
+	// Interactive dashboard requires VT processing for ANSI cursor positioning.
+	if !ui.IsVTEnabled() {
+		// Fall back to single-shot JSON output when VT is unavailable.
+		fmt.Fprintln(os.Stderr, "Note: Live dashboard requires a modern terminal with ANSI support.")
+		fmt.Fprintln(os.Stderr, "Falling back to single-shot JSON output.")
+		fmt.Fprintln(os.Stderr, "")
+		metrics, err := status.CollectMetrics(nil, 0)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		data, _ := json.MarshalIndent(metrics, "", "  ")
+		fmt.Println(string(data))
+		return
+	}
+
 	interval := time.Duration(refreshSecs) * time.Second
 	model := status.NewStatusModel(interval)
 	p := tea.NewProgram(model, tea.WithAltScreen())
