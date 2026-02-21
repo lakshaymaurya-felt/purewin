@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"container/heap"
 	"os"
 	"path/filepath"
 	"sort"
@@ -219,4 +220,126 @@ func (s *Scanner) calculateSizes(entry *DirEntry) {
 	sort.Slice(entry.Children, func(i, j int) bool {
 		return entry.Children[i].Size > entry.Children[j].Size
 	})
+}
+
+// ─── Fuzzy Search ────────────────────────────────────────────────────────────
+
+// fuzzyMatch returns true if all characters in pattern appear in str in order (case-insensitive).
+// Also returns a score — higher is better (consecutive matches, start-of-word bonuses).
+// Operates on runes to correctly handle multi-byte UTF-8 characters.
+func fuzzyMatch(str, pattern string) (bool, int) {
+	// Case-insensitive
+	strRunes := []rune(strings.ToLower(str))
+	patRunes := []rune(strings.ToLower(pattern))
+
+	if len(patRunes) == 0 {
+		return true, 0
+	}
+	if len(patRunes) > len(strRunes) {
+		return false, 0
+	}
+
+	// Check if all pattern runes exist in order
+	pIdx := 0
+	score := 0
+	prevMatch := false
+	for i := 0; i < len(strRunes) && pIdx < len(patRunes); i++ {
+		if strRunes[i] == patRunes[pIdx] {
+			score += 1
+			if prevMatch {
+				score += 2 // consecutive bonus
+			}
+			if i == 0 || strRunes[i-1] == '/' || strRunes[i-1] == '\\' || strRunes[i-1] == '.' || strRunes[i-1] == '_' || strRunes[i-1] == '-' {
+				score += 3 // start-of-word bonus
+			}
+			pIdx++
+			prevMatch = true
+		} else {
+			prevMatch = false
+		}
+	}
+
+	return pIdx == len(patRunes), score
+}
+
+// SearchResult holds a matched entry and its score.
+type SearchResult struct {
+	Entry *DirEntry
+	Score int
+}
+
+// ─── Min-heap for bounded search results ────────────────────────────────────
+
+// searchHeap implements a min-heap on SearchResult by (Score, Size).
+// The smallest element is at the top so we can evict the worst result efficiently.
+type searchHeap []SearchResult
+
+func (h searchHeap) Len() int { return len(h) }
+
+// Less: min-heap — lowest score first; tie-break by smallest size first.
+func (h searchHeap) Less(i, j int) bool {
+	if h[i].Score != h[j].Score {
+		return h[i].Score < h[j].Score
+	}
+	return h[i].Entry.Size < h[j].Entry.Size
+}
+
+func (h searchHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *searchHeap) Push(x interface{}) {
+	*h = append(*h, x.(SearchResult))
+}
+
+func (h *searchHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+// SearchTreeBounded performs fuzzy search across the entire tree using a min-heap
+// to keep memory bounded at O(maxResults). Returns matches sorted by score desc.
+func SearchTreeBounded(root *DirEntry, query string, maxResults int) []SearchResult {
+	if query == "" || root == nil || maxResults <= 0 {
+		return nil
+	}
+
+	h := &searchHeap{}
+	heap.Init(h)
+
+	var search func(entry *DirEntry)
+	search = func(entry *DirEntry) {
+		if matched, score := fuzzyMatch(entry.Name, query); matched {
+			if h.Len() < maxResults {
+				heap.Push(h, SearchResult{Entry: entry, Score: score})
+			} else if score > (*h)[0].Score || (score == (*h)[0].Score && entry.Size > (*h)[0].Entry.Size) {
+				// Better than worst in heap — replace it.
+				(*h)[0] = SearchResult{Entry: entry, Score: score}
+				heap.Fix(h, 0)
+			}
+		}
+		for _, child := range entry.Children {
+			search(child)
+		}
+	}
+
+	// Search children (not the root itself)
+	for _, child := range root.Children {
+		search(child)
+	}
+
+	// Drain heap into sorted slice (score desc, size desc).
+	// Min-heap pops in ascending order; filling from the back yields descending.
+	results := make([]SearchResult, h.Len())
+	for i := len(results) - 1; i >= 0; i-- {
+		results[i] = heap.Pop(h).(SearchResult)
+	}
+
+	return results
+}
+
+// SearchTree is a convenience alias for SearchTreeBounded.
+func SearchTree(root *DirEntry, query string, maxResults int) []SearchResult {
+	return SearchTreeBounded(root, query, maxResults)
 }

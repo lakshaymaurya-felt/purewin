@@ -3,6 +3,7 @@ package analyze
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lakshaymaurya-felt/purewin/internal/ui"
@@ -14,7 +15,7 @@ import (
 // Coral accent gives the analyzer its own visual identity.
 var (
 	clrDim    = ui.ColorMuted
-	clrDir    = ui.ColorCoral  // coral for analyzer directories
+	clrDir    = ui.ColorCoral // coral for analyzer directories
 	clrFile   = ui.ColorText
 	clrOld    = ui.ColorMuted
 	clrLarge  = ui.ColorWarning
@@ -35,7 +36,15 @@ func (m AnalyzeModel) renderView() string {
 	var s strings.Builder
 	s.WriteString(m.renderHeader(w))
 	s.WriteString("\n")
-	s.WriteString(m.renderBody(w))
+
+	if m.searching {
+		s.WriteString(m.renderSearchInput(w))
+		s.WriteString("\n")
+		s.WriteString(m.renderSearchResults(w))
+	} else {
+		s.WriteString(m.renderBody(w))
+	}
+
 	s.WriteString("\n")
 	s.WriteString(m.renderFooter(w))
 	return s.String()
@@ -174,6 +183,104 @@ func (m AnalyzeModel) renderEntry(num int, entry *DirEntry, parentSize int64, ba
 	return line
 }
 
+// ─── Search UI ───────────────────────────────────────────────────────────────
+
+func (m AnalyzeModel) renderSearchInput(w int) string {
+	prompt := lipgloss.NewStyle().
+		Foreground(ui.ColorCoral).
+		Bold(true).
+		Render("  / ")
+
+	query := lipgloss.NewStyle().
+		Foreground(ui.ColorText).
+		Render(m.searchQuery)
+
+	cursor := lipgloss.NewStyle().
+		Foreground(ui.ColorCoral).
+		Render("▎")
+
+	return prompt + query + cursor
+}
+
+func (m AnalyzeModel) renderSearchResults(w int) string {
+	if m.searchQuery == "" {
+		return lipgloss.NewStyle().
+			Foreground(ui.ColorMuted).
+			Italic(true).
+			Render("  Type to search across all files and directories…")
+	}
+
+	if len(m.searchResults) == 0 {
+		return lipgloss.NewStyle().
+			Foreground(ui.ColorMuted).
+			Italic(true).
+			Render("  No matches found")
+	}
+
+	vh := m.viewportHeight()
+	var lines []string
+
+	// Calculate scroll offset for search results
+	searchOffset := 0
+	if m.searchCursor >= vh {
+		searchOffset = m.searchCursor - vh + 1
+	}
+
+	for i := searchOffset; i < len(m.searchResults) && i < searchOffset+vh; i++ {
+		r := m.searchResults[i]
+		entry := r.Entry
+
+		// Icon
+		icon := ui.IconBullet + " "
+		if entry.IsDir {
+			icon = ui.IconFolder
+		}
+
+		// Name with path context
+		nameColor := clrFile
+		if entry.IsDir {
+			nameColor = clrDir
+		}
+
+		// Show parent path for context
+		parentPath := ""
+		if entry.Parent != nil {
+			parentPath = entry.Parent.Path
+			// Truncate long paths — rune-safe to avoid splitting multi-byte UTF-8.
+			maxPathLen := w - 50
+			if maxPathLen < 20 {
+				maxPathLen = 20
+			}
+			if runeCount := utf8.RuneCountInString(parentPath); runeCount > maxPathLen {
+				runes := []rune(parentPath)
+				parentPath = "…" + string(runes[runeCount-maxPathLen+1:])
+			}
+		}
+
+		name := lipgloss.NewStyle().Foreground(nameColor).Bold(entry.IsDir).Render(entry.Name)
+		path := lipgloss.NewStyle().Foreground(ui.ColorMuted).Render(parentPath)
+		size := ui.FormatSize(entry.Size)
+
+		line := fmt.Sprintf("  %s %s  %s  %s", icon, name, size, path)
+
+		if i == m.searchCursor {
+			cursor := lipgloss.NewStyle().Foreground(clrCursor).Bold(true).Render(ui.IconBlock)
+			line = " " + cursor + line[2:]
+		}
+
+		lines = append(lines, line)
+	}
+
+	// Result count
+	countLine := lipgloss.NewStyle().
+		Foreground(ui.ColorMuted).
+		Italic(true).
+		Render(fmt.Sprintf("  ── %d result(s) ──", len(m.searchResults)))
+	lines = append(lines, countLine)
+
+	return strings.Join(lines, "\n")
+}
+
 // ─── Footer ──────────────────────────────────────────────────────────────────
 
 func (m AnalyzeModel) renderFooter(w int) string {
@@ -187,17 +294,30 @@ func (m AnalyzeModel) renderFooter(w int) string {
 				Render("  "+ui.IconError+" "+m.err.Error()))
 	}
 
+	if m.searching {
+		// Search mode hints
+		hints := []string{
+			"↑↓ navigate",
+			"Enter select",
+			"Esc cancel",
+		}
+		hintStr := strings.Join(hints, " "+ui.IconPipe+" ")
+		parts = append(parts, ui.HintBarStyle().Render("  "+hintStr))
+		return strings.Join(parts, "\n")
+	}
+
 	// Filter indicator.
 	if m.largeOnly {
 		parts = append(parts,
 			"  "+ui.TagWarningStyle().Render(" >100 MiB filter "))
 	}
 
-	// Keybindings.
+	// Normal mode keybindings — ADD "/ search"
 	hints := []string{
 		"↑↓ nav",
 		"→ drill",
 		"← back",
+		"/ search",
 		"Enter open",
 		"⌫ delete",
 		"L large",

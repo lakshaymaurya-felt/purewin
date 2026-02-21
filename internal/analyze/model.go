@@ -4,10 +4,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/lakshaymaurya-felt/purewin/internal/core"
 )
+
+// searchTickMsg is sent after a debounce delay to trigger the actual search.
+type searchTickMsg struct {
+	query string
+}
+
+// searchDebounce is the delay before running SearchTree after a keystroke.
+const searchDebounce = 150 * time.Millisecond
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
@@ -41,6 +51,12 @@ type AnalyzeModel struct {
 	err           error
 	maxDepth      int   // 0 = unlimited
 	minSize       int64 // 0 = show all
+
+	// Search state
+	searching     bool           // true when in search mode
+	searchQuery   string         // current search input
+	searchResults []SearchResult // cached search results
+	searchCursor  int            // cursor within search results
 }
 
 // NewAnalyzeModel creates an AnalyzeModel rooted at the given scan result.
@@ -68,6 +84,54 @@ func (m AnalyzeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Search mode input handling.
+		if m.searching {
+			switch msg.Type {
+			case tea.KeyEscape:
+				m.searching = false
+				m.searchQuery = ""
+				m.searchResults = nil
+				m.searchCursor = 0
+				return m, nil
+			case tea.KeyEnter:
+				if m.searchCursor >= 0 && m.searchCursor < len(m.searchResults) {
+					m.navigateToEntry(m.searchResults[m.searchCursor].Entry)
+					m.searching = false
+					m.searchQuery = ""
+					m.searchResults = nil
+					m.searchCursor = 0
+				}
+				return m, nil
+			case tea.KeyUp:
+				if m.searchCursor > 0 {
+					m.searchCursor--
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.searchCursor < len(m.searchResults)-1 {
+					m.searchCursor++
+				}
+				return m, nil
+			case tea.KeyBackspace:
+				if len(m.searchQuery) > 0 {
+					_, size := utf8.DecodeLastRuneInString(m.searchQuery)
+					m.searchQuery = m.searchQuery[:len(m.searchQuery)-size]
+					m.searchCursor = 0
+					return m, tea.Tick(searchDebounce, func(t time.Time) tea.Msg {
+						return searchTickMsg{query: m.searchQuery}
+					})
+				}
+				return m, nil
+			case tea.KeyRunes:
+				m.searchQuery += string(msg.Runes)
+				m.searchCursor = 0
+				return m, tea.Tick(searchDebounce, func(t time.Time) tea.Msg {
+					return searchTickMsg{query: m.searchQuery}
+				})
+			}
+			return m, nil
+		}
+
 		// If awaiting delete confirmation, only Enter confirms.
 		if m.confirmDelete {
 			if msg.String() == "enter" {
@@ -82,7 +146,12 @@ func (m AnalyzeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "q", "esc", "ctrl+c":
+		case "q", "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+
+		case "esc":
+			// In normal mode, esc also quits
 			m.quitting = true
 			return m, tea.Quit
 
@@ -139,8 +208,26 @@ func (m AnalyzeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.largeOnly = !m.largeOnly
 			m.cursor = 0
 			m.offset = 0
+
+		case "/":
+			m.searching = true
+			m.searchQuery = ""
+			m.searchResults = nil
+			m.searchCursor = 0
+			return m, nil
 		}
 
+		return m, nil
+
+	case searchTickMsg:
+		// Only execute search if query hasn't changed since the tick was scheduled (debounce).
+		if m.searching && msg.query == m.searchQuery {
+			m.searchResults = SearchTreeBounded(m.root, m.searchQuery, 50)
+			// Clamp cursor — results may be shorter than the old list the user was navigating.
+			if m.searchCursor >= len(m.searchResults) {
+				m.searchCursor = 0
+			}
+		}
 		return m, nil
 
 	case deleteResultMsg:
@@ -238,6 +325,36 @@ func (m *AnalyzeModel) removeEntry(path string) {
 // currentDepth returns how many levels deep the current directory is from root.
 func (m AnalyzeModel) currentDepth() int {
 	return len(m.breadcrumb)
+}
+
+// navigateToEntry builds a breadcrumb trail to the given entry's parent and
+// sets the cursor to the entry. Used when selecting a search result.
+func (m *AnalyzeModel) navigateToEntry(entry *DirEntry) {
+	// Build breadcrumb from root to entry's parent
+	var trail []*DirEntry
+	current := entry.Parent
+	for current != nil && current != m.root {
+		trail = append([]*DirEntry{current}, trail...)
+		current = current.Parent
+	}
+
+	m.breadcrumb = trail
+	if entry.Parent != nil {
+		m.current = entry.Parent
+	} else {
+		m.current = m.root
+	}
+
+	// Find entry index in parent's children
+	m.cursor = 0
+	for i, child := range m.current.Children {
+		if child == entry {
+			m.cursor = i
+			break
+		}
+	}
+	m.offset = 0
+	m.ensureVisible()
 }
 
 // openInExplorer opens the parent folder of a path with the item selected.
